@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `DecisionRecorder` and `AgentContext` gain opt-in `evaluators`/`eval_config` constructor parameters that run `semantica.evals` evaluators (e.g. `decision_scores`) automatically during `record_decision()`, storing `eval_score`/`eval_passed`/`eval_details` in `Decision.metadata`. Fully backward-compatible: omitting `evaluators` leaves recording behavior unchanged. Evaluator failures are logged and never block decision persistence. Wired for the `graph_store` backend only; the `context_graph` `AgentContext` backend is a known follow-up.
+
 - **Pluggable, persistent backend for `ExtractionCache`** (#1581) by @Besokus
   - `ExtractionCache` now delegates storage to a `CacheBackend`, keeping stable SHA-256 key derivation (text + params, with `provider`/`model`/generation params; sensitive keys filtered) and the public `get`/`set`/`clear`/`get_stats` API in one place. Default behavior is unchanged — an in-memory LRU + TTL backend (`InMemoryBackend`)
   - New `SqliteCacheBackend` (`semantica.semantic_extract`, lazy export): a persistent backend backed by the stdlib `sqlite3`, so cached extraction results **survive a process restart** — a fresh process (CI job, notebook kernel, batch worker, extraction subprocess) reuses prior results instead of re-paying every LLM call. TTL and LRU (by last access) mirror the in-memory backend. Values are serialized with a pluggable serializer (`pickle` by default; pass e.g. `json` to avoid pickle — point the DB at a trusted, local path)
@@ -339,7 +341,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Broken star history chart in README** (#1057) by @OctoBored — the embedded chart used the GitHub stargazer API, now access-restricted; switched to a token-free alternative data source
 
 ### Security
-
 
 ## [0.6.6] - 2026-08-20
 
