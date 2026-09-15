@@ -906,6 +906,139 @@ class TestReason:
         assert "reason query" in result.output
         assert "Traceback" not in result.output
 
+    def test_run_rejects_unwired_deductive_and_abductive(self, runner):
+        # deductive/abductive still take inputs (premises/observations) this
+        # command doesn't wire up yet -- only sparql gets the "reason query"
+        # hint since the other two have no equivalent command to redirect to.
+        for engine in ("deductive", "abductive"):
+            result = runner.invoke(cli_module.main,
+                                   ["reason", "run", "--engine", engine])
+            assert result.exit_code != 0
+            assert "not wired" in result.output
+            assert "Traceback" not in result.output
+
+    def test_run_datalog_derives_facts_from_graph_store(self, runner, monkeypatch, tmp_path):
+        """--engine datalog should run DatalogReasoner.derive_all(), not infer_facts()."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.dl"
+        rules_file.write_text(
+            "human(X) :- person(X).\n"
+            "manager(X) :- manages(X, Y).\n",
+            encoding="utf-8")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}},
+                        {"id": 2, "labels": ["Person", "Employee"], "properties": {"name": "Bob"}}]
+
+            def get_relationships(self, limit=None):
+                return [{"id": 9, "type": "MANAGES", "start_node_id": 1, "end_node_id": 2}]
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "datalog", "--rules", str(rules_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "datalog"
+        # person(alice), person(bob), employee(bob), manages(alice, bob)
+        assert data["facts"] == 4
+        assert "human(alice)" in data["inferred_facts"]
+        assert "human(bob)" in data["inferred_facts"]
+        assert "manager(alice)" in data["inferred_facts"]
+        # Base facts must not be reported back as "inferred".
+        assert "person(alice)" not in data["inferred_facts"]
+        assert data["inferred_count"] == len(data["inferred_facts"])
+
+    def test_run_datalog_rejects_ifthen_rules_cleanly(self, runner, monkeypatch, tmp_path):
+        """A rete-style '--rules' file (IF/THEN) is not valid Datalog syntax;
+        it must surface as a clean error, not a Traceback."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["reason", "run", "--engine", "datalog", "--rules", str(rules_file)],
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+
+    def test_run_datalog_no_rules_uses_empty_ruleset(self, runner, monkeypatch):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}}]
+
+            def get_relationships(self, limit=None):
+                return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(
+            cli_module.main, ["--json", "reason", "run", "--engine", "datalog"])
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["facts"] == 1
+        assert data["inferred_count"] == 0
+        assert data["inferred_facts"] == []
+
+    def test_run_graph_requires_query(self, runner, monkeypatch):
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(cli_module.main, ["reason", "run", "--engine", "graph"])
+        assert result.exit_code != 0
+        assert "--query" in result.output
+        assert "Traceback" not in result.output
+
+    def test_run_graph_dispatches_to_graph_reasoner(self, runner, monkeypatch, tmp_path):
+        """--engine graph should call GraphReasoner.reason(graph, query) and
+        surface its natural-language answer, not the facts-count shape."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}},
+                        {"id": 2, "labels": ["Person"], "properties": {"name": "Bob"}}]
+
+            def get_relationships(self, limit=None):
+                return [{"id": 9, "type": "MANAGES", "start_node_id": 1, "end_node_id": 2}]
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+
+        class _FakeGraphReasoner:
+            def __init__(self, config=None, **kwargs):
+                pass
+
+            def reason(self, graph, query, **options):
+                assert graph["entities"][0]["name"] == "Alice"
+                assert graph["relationships"][0]["type"] == "MANAGES"
+                assert query == "Who manages Bob?"
+                return "Alice manages Bob."
+
+        monkeypatch.setattr(
+            "semantica.reasoning.GraphReasoner", _FakeGraphReasoner, raising=False)
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "graph",
+             "--query", "Who manages Bob?"],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "graph"
+        assert data["query"] == "Who manages Bob?"
+        assert data["answer"] == "Alice manages Bob."
+        assert data["facts"] == 3
+
     def test_load_rule_definitions_formats(self, tmp_path):
         yaml_list = tmp_path / "list.yaml"
         yaml_list.write_text('- IF A(?x) THEN B(?x)\n- IF B(?x) THEN C(?x)\n',
