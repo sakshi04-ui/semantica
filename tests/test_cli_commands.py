@@ -15,6 +15,7 @@ Strategy:
 
 import json
 import os
+import re
 import stat
 import types
 from typing import Any
@@ -902,20 +903,144 @@ class TestReason:
         result = runner.invoke(cli_module.main,
                                ["reason", "run", "--engine", "sparql"])
         assert result.exit_code != 0
-        assert "not wired" in result.output
-        assert "reason query" in result.output
+        # Normalize away box-drawing borders and whitespace: the Rich error
+        # panel wraps long messages across lines at the terminal width and
+        # inserts border characters at the wrap point, which would
+        # otherwise split "reason query" mid-word and break a raw substring
+        # check.
+        normalized = " ".join(re.sub(r"[─-╿]", " ", result.output).split())
+        assert "not wired" in normalized
+        assert "reason query" in normalized
         assert "Traceback" not in result.output
 
-    def test_run_rejects_unwired_deductive_and_abductive(self, runner):
-        # deductive/abductive still take inputs (premises/observations) this
-        # command doesn't wire up yet -- only sparql gets the "reason query"
-        # hint since the other two have no equivalent command to redirect to.
-        for engine in ("deductive", "abductive"):
-            result = runner.invoke(cli_module.main,
-                                   ["reason", "run", "--engine", engine])
-            assert result.exit_code != 0
-            assert "not wired" in result.output
-            assert "Traceback" not in result.output
+    def test_run_deductive_falls_back_to_graph_store_facts(self, runner, monkeypatch, tmp_path):
+        """--engine deductive without --premises should build Premises from
+        the graph store, matching the rete/datalog fallback convention."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text(
+            "- IF Person(?x) THEN Human(?x)\n"
+            "- IF MANAGES(?x, ?y) THEN Manager(?x)\n",
+            encoding="utf-8")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}},
+                        {"id": 2, "labels": ["Person", "Employee"], "properties": {"name": "Bob"}}]
+
+            def get_relationships(self, limit=None):
+                return [{"id": 9, "type": "MANAGES", "start_node_id": 1, "end_node_id": 2}]
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "deductive", "--rules", str(rules_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "deductive"
+        assert data["facts"] == 4
+        assert "Human(Alice)" in data["inferred_facts"]
+        assert "Human(Bob)" in data["inferred_facts"]
+        assert "Manager(Alice)" in data["inferred_facts"]
+        assert data["inferred_count"] == len(data["inferred_facts"])
+
+    def test_run_deductive_uses_premises_file(self, runner, monkeypatch, tmp_path):
+        """--premises should be used instead of the graph store when given,
+        and accept both plain strings and {statement, confidence} entries."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+        premises_file = tmp_path / "premises.yaml"
+        premises_file.write_text(
+            "- Person(Alice)\n"
+            "- {statement: 'Person(Bob)', confidence: 0.7}\n",
+            encoding="utf-8")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "deductive",
+             "--rules", str(rules_file), "--premises", str(premises_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["facts"] == 2
+        assert "Human(Alice)" in data["inferred_facts"]
+        assert "Human(Bob)" in data["inferred_facts"]
+
+    def test_run_abductive_requires_observations(self, runner, monkeypatch):
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(cli_module.main, ["reason", "run", "--engine", "abductive"])
+        assert result.exit_code != 0
+        assert "--observations" in result.output
+        assert "Traceback" not in result.output
+
+    def test_run_abductive_finds_explanations(self, runner, monkeypatch, tmp_path):
+        """--engine abductive should find rules whose conclusion explains
+        each observation, not force everything through infer_facts()."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+        obs_file = tmp_path / "observations.yaml"
+        obs_file.write_text("- Human(Alice)\n", encoding="utf-8")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}}]
+
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "abductive",
+             "--rules", str(rules_file), "--observations", str(obs_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "abductive"
+        assert data["observations"] == 1
+        assert len(data["explanations"]) == 1
+        exp = data["explanations"][0]
+        assert exp["observation"] == "Human(Alice)"
+        assert exp["best_hypothesis"] is not None
+        assert exp["hypotheses_considered"] == 1
+
+    def test_run_abductive_no_matching_rule_returns_empty_explanation(
+        self, runner, monkeypatch, tmp_path
+    ):
+        """An observation no loaded rule can explain must report cleanly
+        (no hypotheses), not crash or fabricate an explanation."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+        obs_file = tmp_path / "observations.yaml"
+        obs_file.write_text("- Unicorn(Alice)\n", encoding="utf-8")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "abductive",
+             "--rules", str(rules_file), "--observations", str(obs_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        exp = data["explanations"][0]
+        assert exp["best_hypothesis"] is None
+        assert exp["hypotheses_considered"] == 0
 
     def test_run_datalog_derives_facts_from_graph_store(self, runner, monkeypatch, tmp_path):
         """--engine datalog should run DatalogReasoner.derive_all(), not infer_facts()."""
@@ -1176,18 +1301,80 @@ class TestReason:
         # Plain-text fallback: the non-comment, non-blank line becomes a rule.
         assert result == ["rules: null"]
 
-    def test_run_rejects_deductive_engine(self, runner, monkeypatch):
-        """Engines other than rete/forward-chain must be rejected with a helpful message."""
+    def test_load_premises_formats(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        plain = tmp_path / "plain.yaml"
+        plain.write_text("- Person(Alice)\n- Person(Bob)\n", encoding="utf-8")
+        premises = cli_module._load_premises(str(plain))
+        assert [p.statement for p in premises] == ["Person(Alice)", "Person(Bob)"]
+        assert [p.confidence for p in premises] == [1.0, 1.0]
+
+        with_confidence = tmp_path / "confidence.yaml"
+        with_confidence.write_text(
+            "- {statement: 'Person(Alice)', confidence: 0.5}\n", encoding="utf-8")
+        premises = cli_module._load_premises(str(with_confidence))
+        assert premises[0].statement == "Person(Alice)"
+        assert premises[0].confidence == 0.5
+
+        mapping = tmp_path / "mapping.yaml"
+        mapping.write_text("premises:\n  - Person(Alice)\n", encoding="utf-8")
+        premises = cli_module._load_premises(str(mapping))
+        assert [p.statement for p in premises] == ["Person(Alice)"]
+
+    def test_load_premises_missing_statement_raises(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("- {confidence: 0.5}\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="missing 'statement'"):
+            cli_module._load_premises(str(bad))
+
+    def test_load_observations_formats(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        plain = tmp_path / "plain.yaml"
+        plain.write_text("- Human(Alice)\n", encoding="utf-8")
+        observations = cli_module._load_observations(str(plain))
+        assert [o.description for o in observations] == ["Human(Alice)"]
+
+        with_facts = tmp_path / "with_facts.yaml"
+        with_facts.write_text(
+            "- {description: 'Human(Alice)', facts: ['Person(Alice)']}\n", encoding="utf-8")
+        observations = cli_module._load_observations(str(with_facts))
+        assert observations[0].description == "Human(Alice)"
+        assert observations[0].facts == ["Person(Alice)"]
+
+        mapping = tmp_path / "mapping.yaml"
+        mapping.write_text("observations:\n  - Human(Alice)\n", encoding="utf-8")
+        observations = cli_module._load_observations(str(mapping))
+        assert [o.description for o in observations] == ["Human(Alice)"]
+
+    def test_load_observations_missing_description_raises(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("- {facts: []}\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="missing 'description'"):
+            cli_module._load_observations(str(bad))
+
+    def test_run_deductive_no_rules_uses_empty_ruleset(self, runner, monkeypatch):
+        """--engine deductive is wired to DeductiveReasoner.apply_logic() (#1478);
+        it must no longer be rejected -- zero rules just means zero conclusions,
+        matching the rete/datalog no-op-ruleset convention."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
 
         class _EmptyStore:
             def get_nodes(self, limit=None): return []
             def get_relationships(self, limit=None): return []
 
         monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
-        result = runner.invoke(cli_module.main, ["reason", "run", "--engine", "deductive"])
-        assert result.exit_code != 0
-        assert "not wired" in result.output
-        assert "Traceback" not in result.output
+        result = runner.invoke(
+            cli_module.main, ["--json", "reason", "run", "--engine", "deductive"])
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "deductive"
+        assert data["facts"] == 0
+        assert data["inferred_count"] == 0
+        assert data["inferred_facts"] == []
 
     def test_explain_requires_conclusion(self, runner):
         result = runner.invoke(cli_module.main, ["reason", "explain"])

@@ -1239,6 +1239,100 @@ def _load_rule_definitions(path: str) -> List[str]:
             if line.strip() and not line.lstrip().startswith("#")]
 
 
+def _load_premises(path: str) -> List[Any]:
+    """Load DeductiveReasoner ``Premise`` objects from a YAML file.
+
+    Mirrors _load_rule_definitions()'s format conventions: a YAML list of
+    plain statement strings, a list of ``{statement, confidence}`` mappings,
+    a top-level ``{"premises": [...]}`` mapping, or plain-text lines.
+
+    ``confidence`` is accepted and parsed onto the Premise (the dataclass
+    has the field, so a doc-shaped input shouldn't be rejected), but
+    DeductiveReasoner.apply_logic() never reads premise.confidence -- every
+    derived Conclusion's confidence comes from the firing rule's confidence
+    instead. Setting it currently has no effect on the result.
+    """
+    from .reasoning.deductive_reasoner import Premise
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        data = None
+    if isinstance(data, dict):
+        premises_value = data.get("premises")
+        if premises_value is None and "premises" not in data:
+            raise click.ClickException(
+                f"Premises file '{path}' is a YAML mapping but has no 'premises' key. "
+                "Expected either a YAML list or a mapping with a 'premises' list."
+            )
+        data = premises_value
+    if not isinstance(data, list):
+        data = [line.strip() for line in text.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")]
+    premises = []
+    for i, item in enumerate(data):
+        if isinstance(item, dict):
+            statement = item.get("statement")
+            if not statement:
+                raise click.ClickException(
+                    f"Premise entry {i} in '{path}' is missing 'statement'.")
+            premises.append(Premise(
+                premise_id=str(item.get("id", f"premise_{i}")),
+                statement=str(statement),
+                confidence=float(item.get("confidence", 1.0)),
+            ))
+        else:
+            premises.append(Premise(premise_id=f"premise_{i}", statement=str(item)))
+    return premises
+
+
+def _load_observations(path: str) -> List[Any]:
+    """Load AbductiveReasoner ``Observation`` objects from a YAML file.
+
+    Mirrors _load_rule_definitions()'s format conventions: a YAML list of
+    plain description strings, a list of ``{description, facts}`` mappings,
+    a top-level ``{"observations": [...]}`` mapping, or plain-text lines.
+
+    ``facts`` is accepted and parsed onto the Observation (the dataclass
+    has the field), but nothing in abductive_reasoner.py currently reads
+    observation.facts -- hypothesis generation only matches a rule's
+    conclusion against observation.description. Setting it currently has
+    no effect on the result.
+    """
+    from .reasoning.abductive_reasoner import Observation
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        data = None
+    if isinstance(data, dict):
+        obs_value = data.get("observations")
+        if obs_value is None and "observations" not in data:
+            raise click.ClickException(
+                f"Observations file '{path}' is a YAML mapping but has no 'observations' key. "
+                "Expected either a YAML list or a mapping with an 'observations' list."
+            )
+        data = obs_value
+    if not isinstance(data, list):
+        data = [line.strip() for line in text.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")]
+    observations = []
+    for i, item in enumerate(data):
+        if isinstance(item, dict):
+            description = item.get("description")
+            if not description:
+                raise click.ClickException(
+                    f"Observation entry {i} in '{path}' is missing 'description'.")
+            observations.append(Observation(
+                observation_id=str(item.get("id", f"obs_{i}")),
+                description=str(description),
+                facts=item.get("facts", []),
+            ))
+        else:
+            observations.append(Observation(observation_id=f"obs_{i}", description=str(item)))
+    return observations
+
+
 def _graph_store_facts(cli_ctx: CLIContext) -> List[str]:
     """Read the configured graph store into Reasoner fact strings.
 
@@ -2378,10 +2472,16 @@ def reason(ctx: click.Context) -> None:
               help="Custom rules file (YAML for rete, Datalog Horn clauses for datalog).")
 @click.option("--query", "query_text", default=None,
               help="Natural-language question, required for --engine graph.")
+@click.option("--premises", "premises_file", default=None, type=click.Path(exists=True),
+              help="Premises file for --engine deductive (YAML list of statements; "
+                   "falls back to graph-store facts if omitted).")
+@click.option("--observations", "observations_file", default=None, type=click.Path(exists=True),
+              help="Observations file for --engine abductive (required).")
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
 def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
-               query_text: Optional[str], local_json: bool) -> None:
+               query_text: Optional[str], premises_file: Optional[str],
+               observations_file: Optional[str], local_json: bool) -> None:
     """Execute a reasoning engine against the knowledge graph.
 
     \b
@@ -2389,6 +2489,8 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
       semantica reason run --engine rete --rules business-rules.yaml
       semantica reason run --engine datalog --rules facts.dl
       semantica reason run --engine graph --query "Who manages Bob?"
+      semantica reason run --engine deductive --premises premises.yaml --rules rules.yaml
+      semantica reason run --engine abductive --observations observations.yaml --rules rules.yaml
     """
     cli_ctx = _require_ctx(cli_ctx)
 
@@ -2480,18 +2582,91 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
             except ImportError as exc:
                 raise click.ClickException(f"Reasoning module not available: {exc}") from exc
 
+        elif engine == "deductive":
+            try:
+                # DeductiveReasoner/Premise aren't re-exported from
+                # semantica.reasoning's __init__ (unlike DatalogReasoner/
+                # GraphReasoner) -- import from the submodule directly.
+                from .reasoning.deductive_reasoner import DeductiveReasoner, Premise
+                dr = DeductiveReasoner(config=cli_ctx.config.to_dict())
+                for rule_def in (_load_rule_definitions(rules) if rules else []):
+                    dr.reasoner.add_rule(rule_def)
+                # DeductiveReasoner uses the same "IF X THEN Y" / "?x"
+                # syntax as rete (both go through Reasoner.add_rule()), so
+                # --rules files are shared across the two engines unchanged.
+                if premises_file:
+                    premises = _load_premises(premises_file)
+                else:
+                    premises = [Premise(premise_id=f"fact_{i}", statement=fact)
+                                for i, fact in enumerate(_graph_store_facts(cli_ctx))]
+
+                def _infer() -> Dict[str, Any]:
+                    conclusions = dr.apply_logic(premises)
+                    return {
+                        "engine": engine,
+                        "facts": len(premises),
+                        "inferred_count": len(conclusions),
+                        "inferred_facts": [c.statement for c in conclusions],
+                    }
+
+                result = _run_reasoning_with_status(cli_ctx, engine, _infer)
+            except ImportError as exc:
+                raise click.ClickException(f"Reasoning module not available: {exc}") from exc
+
+        elif engine == "abductive":
+            if not observations_file:
+                raise click.ClickException(
+                    "Engine 'abductive' requires --observations <file>.")
+            try:
+                from .reasoning.abductive_reasoner import AbductiveReasoner
+                ab = AbductiveReasoner(config=cli_ctx.config.to_dict())
+                for rule_def in (_load_rule_definitions(rules) if rules else []):
+                    ab.reasoner.add_rule(rule_def)
+                # add_knowledge() is the engine's own extension point for
+                # background facts, but the current generate_hypotheses()/
+                # find_explanations() implementation doesn't read
+                # knowledge_base yet -- only loaded --rules drive hypothesis
+                # generation. Calling it keeps this future-compatible
+                # without the CLI output claiming graph facts influenced
+                # the result today.
+                ab.add_knowledge(_graph_store_facts(cli_ctx))
+                observations = _load_observations(observations_file)
+
+                def _infer() -> Dict[str, Any]:
+                    explanations = ab.find_explanations(observations)
+                    return {
+                        "engine": engine,
+                        "observations": len(observations),
+                        "explanations": [
+                            {
+                                "observation": exp.observation.description,
+                                "best_hypothesis": (
+                                    exp.best_hypothesis.explanation
+                                    if exp.best_hypothesis else None
+                                ),
+                                "confidence": exp.confidence,
+                                "hypotheses_considered": len(exp.hypotheses),
+                            }
+                            for exp in explanations
+                        ],
+                    }
+
+                result = _run_reasoning_with_status(cli_ctx, engine, _infer)
+            except ImportError as exc:
+                raise click.ClickException(f"Reasoning module not available: {exc}") from exc
+
         else:
-            # sparql/deductive/abductive take inputs (triplet-store queries,
-            # premises, observations) this command doesn't wire up yet.
-            # SPARQLReasoner in particular has no query-execution path at
-            # all yet (execute_query() raises NotImplementedError), so
-            # there is nothing real to dispatch to. Fail honestly instead
-            # of silently forward-chaining under another engine's name.
-            hint = (" Use 'semantica reason query' for SPARQL queries."
-                    if engine == "sparql" else "")
+            # sparql is the only remaining engine choice, and it has no
+            # execution path to dispatch to at all: SPARQLReasoner.
+            # execute_query() raises NotImplementedError unconditionally
+            # and the class has no .query() method either. Fail honestly
+            # instead of silently forward-chaining under another engine's
+            # name.
             raise click.ClickException(
-                f"Engine '{engine}' is not wired to 'reason run' yet; "
-                f"supported engines: rete, forward-chain, datalog, graph.{hint}")
+                "Engine 'sparql' is not wired to 'reason run' yet; "
+                "supported engines: rete, forward-chain, datalog, graph, "
+                "deductive, abductive. Use 'semantica reason query' for "
+                "SPARQL queries.")
 
         if _is_json(cli_ctx, local_json):
             _jecho(result if isinstance(result, dict) else {"result": str(result)})
