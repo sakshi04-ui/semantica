@@ -1259,14 +1259,21 @@ def _load_premises(path: str) -> List[Any]:
     except yaml.YAMLError:
         data = None
     if isinstance(data, dict):
-        premises_value = data.get("premises")
-        if premises_value is None and "premises" not in data:
+        if "premises" not in data:
             raise click.ClickException(
                 f"Premises file '{path}' is a YAML mapping but has no 'premises' key. "
                 "Expected either a YAML list or a mapping with a 'premises' list."
             )
+        premises_value = data["premises"]
+        # A present-but-non-list value (e.g. "premises: null") must be a
+        # clear error, not silently fall through to reinterpreting the raw
+        # file text as one-statement-per-line plain text.
+        if not isinstance(premises_value, list):
+            raise click.ClickException(
+                f"Premises file '{path}' has a 'premises' key that is not a list."
+            )
         data = premises_value
-    if not isinstance(data, list):
+    elif not isinstance(data, list):
         data = [line.strip() for line in text.splitlines()
                 if line.strip() and not line.lstrip().startswith("#")]
     premises = []
@@ -1283,6 +1290,8 @@ def _load_premises(path: str) -> List[Any]:
             ))
         else:
             premises.append(Premise(premise_id=f"premise_{i}", statement=str(item)))
+    if not premises:
+        raise click.ClickException(f"Premises file '{path}' contains no premises.")
     return premises
 
 
@@ -1306,14 +1315,23 @@ def _load_observations(path: str) -> List[Any]:
     except yaml.YAMLError:
         data = None
     if isinstance(data, dict):
-        obs_value = data.get("observations")
-        if obs_value is None and "observations" not in data:
+        if "observations" not in data:
             raise click.ClickException(
                 f"Observations file '{path}' is a YAML mapping but has no 'observations' key. "
                 "Expected either a YAML list or a mapping with an 'observations' list."
             )
+        obs_value = data["observations"]
+        # A present-but-non-list value (e.g. "observations: null") must be
+        # a clear error, not silently fall through to reinterpreting the
+        # raw file text as one-description-per-line plain text -- that
+        # path could otherwise hand find_explanations() a single bogus
+        # observation and report a misleading "success".
+        if not isinstance(obs_value, list):
+            raise click.ClickException(
+                f"Observations file '{path}' has an 'observations' key that is not a list."
+            )
         data = obs_value
-    if not isinstance(data, list):
+    elif not isinstance(data, list):
         data = [line.strip() for line in text.splitlines()
                 if line.strip() and not line.lstrip().startswith("#")]
     observations = []
@@ -1330,6 +1348,8 @@ def _load_observations(path: str) -> List[Any]:
             ))
         else:
             observations.append(Observation(observation_id=f"obs_{i}", description=str(item)))
+    if not observations:
+        raise click.ClickException(f"Observations file '{path}' contains no observations.")
     return observations
 
 
@@ -1415,10 +1435,16 @@ def _lowercase_datalog_args(fact_str: str) -> str:
 
 
 def _run_reasoning_with_status(
-    cli_ctx: CLIContext, engine: str, fn: Callable[[], Dict[str, Any]]
+    cli_ctx: CLIContext, engine: str, local_json: bool, fn: Callable[[], Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Run a reasoning computation, showing a spinner unless output is quiet/JSON."""
-    if cli_ctx.quiet or cli_ctx.json_output:
+    """Run a reasoning computation, showing a spinner unless output is quiet/JSON.
+
+    Checks _is_json() (global --json OR the command's own --json flag), not
+    just cli_ctx.json_output -- otherwise `reason run --json` (the local
+    flag, global --json omitted) would still print spinner status text to
+    stdout ahead of the JSON payload, corrupting it for a parser.
+    """
+    if cli_ctx.quiet or _is_json(cli_ctx, local_json):
         return fn()
     with console.status(
         f"[{_DIM}]Running {engine} reasoning engine…[/{_DIM}]", spinner="dots"
@@ -2514,7 +2540,7 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
                         "inferred_facts": inferred,
                     }
 
-                result = _run_reasoning_with_status(cli_ctx, engine, _infer)
+                result = _run_reasoning_with_status(cli_ctx, engine, local_json, _infer)
             except ImportError as exc:
                 raise click.ClickException(f"Reasoning module not available: {exc}") from exc
 
@@ -2547,7 +2573,7 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
                         "inferred_facts": inferred,
                     }
 
-                result = _run_reasoning_with_status(cli_ctx, engine, _infer)
+                result = _run_reasoning_with_status(cli_ctx, engine, local_json, _infer)
             except ImportError as exc:
                 raise click.ClickException(f"Reasoning module not available: {exc}") from exc
 
@@ -2578,7 +2604,7 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
                         "answer": answer,
                     }
 
-                result = _run_reasoning_with_status(cli_ctx, engine, _infer)
+                result = _run_reasoning_with_status(cli_ctx, engine, local_json, _infer)
             except ImportError as exc:
                 raise click.ClickException(f"Reasoning module not available: {exc}") from exc
 
@@ -2601,7 +2627,21 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
                                 for i, fact in enumerate(_graph_store_facts(cli_ctx))]
 
                 def _infer() -> Dict[str, Any]:
-                    conclusions = dr.apply_logic(premises)
+                    # apply_logic() scans self.reasoner.rules once, not to a
+                    # fixpoint -- a conclusion whose prerequisite premise is
+                    # itself a *later* rule's conclusion would be silently
+                    # dropped from a single call. known_facts persists on
+                    # the DeductiveReasoner instance across calls (premises
+                    # are just re-added, which is a no-op on a set), so
+                    # looping until a call yields nothing new reaches the
+                    # same fixpoint infer_facts()/derive_all() reach for
+                    # the other engines.
+                    conclusions: List[Any] = []
+                    while True:
+                        new_conclusions = dr.apply_logic(premises)
+                        if not new_conclusions:
+                            break
+                        conclusions.extend(new_conclusions)
                     return {
                         "engine": engine,
                         "facts": len(premises),
@@ -2609,7 +2649,7 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
                         "inferred_facts": [c.statement for c in conclusions],
                     }
 
-                result = _run_reasoning_with_status(cli_ctx, engine, _infer)
+                result = _run_reasoning_with_status(cli_ctx, engine, local_json, _infer)
             except ImportError as exc:
                 raise click.ClickException(f"Reasoning module not available: {exc}") from exc
 
@@ -2622,14 +2662,15 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
                 ab = AbductiveReasoner(config=cli_ctx.config.to_dict())
                 for rule_def in (_load_rule_definitions(rules) if rules else []):
                     ab.reasoner.add_rule(rule_def)
-                # add_knowledge() is the engine's own extension point for
-                # background facts, but the current generate_hypotheses()/
-                # find_explanations() implementation doesn't read
-                # knowledge_base yet -- only loaded --rules drive hypothesis
-                # generation. Calling it keeps this future-compatible
-                # without the CLI output claiming graph facts influenced
-                # the result today.
-                ab.add_knowledge(_graph_store_facts(cli_ctx))
+                # Deliberately not calling _graph_store_facts()/
+                # add_knowledge() here: AbductiveReasoner's current
+                # generate_hypotheses()/find_explanations() never reads
+                # knowledge_base, so it would have no effect on the result
+                # while forcing every abductive run to depend on the
+                # configured graph store being reachable -- even a fully
+                # self-contained --rules + --observations run would fail if
+                # the graph backend is down. Revisit once knowledge_base is
+                # actually consumed by the ranking/generation algorithm.
                 observations = _load_observations(observations_file)
 
                 def _infer() -> Dict[str, Any]:
@@ -2651,7 +2692,7 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
                         ],
                     }
 
-                result = _run_reasoning_with_status(cli_ctx, engine, _infer)
+                result = _run_reasoning_with_status(cli_ctx, engine, local_json, _infer)
             except ImportError as exc:
                 raise click.ClickException(f"Reasoning module not available: {exc}") from exc
 

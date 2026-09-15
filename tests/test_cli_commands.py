@@ -903,15 +903,37 @@ class TestReason:
         result = runner.invoke(cli_module.main,
                                ["reason", "run", "--engine", "sparql"])
         assert result.exit_code != 0
-        # Normalize away box-drawing borders and whitespace: the Rich error
-        # panel wraps long messages across lines at the terminal width and
-        # inserts border characters at the wrap point, which would
+        # _flatten() undoes the Rich panel's line-wrap borders, which would
         # otherwise split "reason query" mid-word and break a raw substring
         # check.
-        normalized = " ".join(re.sub(r"[─-╿]", " ", result.output).split())
+        normalized = _flatten(result.output)
         assert "not wired" in normalized
         assert "reason query" in normalized
         assert "Traceback" not in result.output
+
+    def test_run_reasoning_local_json_flag_suppresses_spinner(self, runner, monkeypatch):
+        """`reason run --json` (the command's own flag, not the global one)
+        must not enter the Rich status spinner. console.status() writes to
+        stdout; entering it under the local-only flag would put status text
+        ahead of the JSON payload in the same stream."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        status_calls = []
+        real_status = cli_module.console.status
+
+        def _spy_status(*a, **kw):
+            status_calls.append((a, kw))
+            return real_status(*a, **kw)
+
+        monkeypatch.setattr(cli_module.console, "status", _spy_status)
+        result = runner.invoke(cli_module.main, ["reason", "run", "--json"])
+        _ok(result)
+        assert status_calls == []
 
     def test_run_deductive_falls_back_to_graph_store_facts(self, runner, monkeypatch, tmp_path):
         """--engine deductive without --premises should build Premises from
@@ -971,6 +993,37 @@ class TestReason:
         data = json.loads(result.output.strip())
         assert data["facts"] == 2
         assert "Human(Alice)" in data["inferred_facts"]
+        assert "Human(Bob)" in data["inferred_facts"]
+
+    def test_run_deductive_reaches_fixpoint_across_rule_order(self, runner, monkeypatch, tmp_path):
+        """DeductiveReasoner.apply_logic() scans its rules once, not to a
+        fixpoint -- a single call would miss Human(Bob) here since the rule
+        deriving it needs Employee(Bob), which is itself only derived by a
+        *later* rule in this same call. reason run must loop apply_logic()
+        until no new conclusions appear so rule order doesn't silently drop
+        valid transitive conclusions."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text(
+            "- IF Employee(?x) THEN Human(?x)\n"
+            "- IF Manager(?x) THEN Employee(?x)\n",
+            encoding="utf-8")
+        premises_file = tmp_path / "premises.yaml"
+        premises_file.write_text("- Manager(Bob)\n", encoding="utf-8")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "deductive",
+             "--rules", str(rules_file), "--premises", str(premises_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert "Employee(Bob)" in data["inferred_facts"]
         assert "Human(Bob)" in data["inferred_facts"]
 
     def test_run_abductive_requires_observations(self, runner, monkeypatch):
@@ -1041,6 +1094,31 @@ class TestReason:
         exp = data["explanations"][0]
         assert exp["best_hypothesis"] is None
         assert exp["hypotheses_considered"] == 0
+
+    def test_run_abductive_does_not_require_graph_store(self, runner, monkeypatch, tmp_path):
+        """A fully self-contained abductive run (--rules + --observations)
+        must not depend on the configured graph store being reachable.
+        AbductiveReasoner doesn't currently consume knowledge_base at all,
+        so calling _graph_store_facts() here would only add a failure mode
+        with no corresponding benefit."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+        obs_file = tmp_path / "observations.yaml"
+        obs_file.write_text("- Human(Alice)\n", encoding="utf-8")
+
+        def _unreachable_store(ctx):
+            raise RuntimeError("graph store should not be contacted")
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", _unreachable_store)
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "abductive",
+             "--rules", str(rules_file), "--observations", str(obs_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["explanations"][0]["best_hypothesis"] is not None
 
     def test_run_datalog_derives_facts_from_graph_store(self, runner, monkeypatch, tmp_path):
         """--engine datalog should run DatalogReasoner.derive_all(), not infer_facts()."""
@@ -1329,6 +1407,25 @@ class TestReason:
         with pytest.raises(_click.ClickException, match="missing 'statement'"):
             cli_module._load_premises(str(bad))
 
+    def test_load_premises_null_key_value_raises(self, tmp_path):
+        """A 'premises' key present but not a list (e.g. YAML null) must be
+        a clear error, not silently reinterpreted as one raw-text line
+        ("premises: null" itself becoming a bogus premise)."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("premises: null\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="not a list"):
+            cli_module._load_premises(str(bad))
+
+    def test_load_premises_empty_list_raises(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        empty = tmp_path / "empty.yaml"
+        empty.write_text("premises: []\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="no premises"):
+            cli_module._load_premises(str(empty))
+
     def test_load_observations_formats(self, tmp_path):
         pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
         plain = tmp_path / "plain.yaml"
@@ -1355,6 +1452,27 @@ class TestReason:
         import click as _click
         with pytest.raises(_click.ClickException, match="missing 'description'"):
             cli_module._load_observations(str(bad))
+
+    def test_load_observations_null_key_value_raises(self, tmp_path):
+        """A 'observations' key present but not a list (e.g. YAML null)
+        must be a clear error. Previously this fell through to
+        reinterpreting the raw file text as plain lines, turning
+        "observations: null" itself into one bogus Observation and letting
+        `reason run --engine abductive` report a misleading success."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("observations: null\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="not a list"):
+            cli_module._load_observations(str(bad))
+
+    def test_load_observations_empty_list_raises(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        empty = tmp_path / "empty.yaml"
+        empty.write_text("observations: []\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="no observations"):
+            cli_module._load_observations(str(empty))
 
     def test_run_deductive_no_rules_uses_empty_ruleset(self, runner, monkeypatch):
         """--engine deductive is wired to DeductiveReasoner.apply_logic() (#1478);
