@@ -7,6 +7,7 @@ enabling users to interact with the framework via terminal commands.
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -1281,18 +1282,47 @@ def _graph_store_as_context(cli_ctx: CLIContext) -> Dict[str, List[Dict[str, Any
         name = props.get("name") or props.get("id") or node.get("id")
         names[node.get("id")] = name
         labels = node.get("labels") or ["Entity"]
-        entities.append({"id": name, "name": name, "type": labels[0], "properties": props})
+        # Multiple labels are all real classifications (mirrors the one
+        # fact-per-label convention _graph_store_facts() uses); joining them
+        # keeps a node with e.g. ["Person", "Employee"] fully described
+        # instead of silently dropping every label but the first.
+        entities.append({
+            "id": name, "name": name, "type": "/".join(labels), "properties": props,
+        })
     rel_out = []
     for rel in relationships:
         source = names.get(rel.get("start_node_id"), rel.get("start_node_id"))
         target = names.get(rel.get("end_node_id"), rel.get("end_node_id"))
-        rel_out.append({"source": source, "target": target,
-                         "type": rel.get("type", "RELATED_TO")})
+        rel_out.append({
+            "source": source, "target": target,
+            "type": rel.get("type", "RELATED_TO"),
+            "properties": rel.get("properties") or {},
+        })
     return {"entities": entities, "relationships": rel_out}
 
 
-def _run_reasoning_with_status(cli_ctx: CLIContext, engine: str,
-                                fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+def _lowercase_datalog_args(fact_str: str) -> str:
+    """Lowercase only a fact string's arguments, keeping the predicate's
+    case untouched.
+
+    DatalogReasoner reads a leading-uppercase *argument* as a variable
+    (constants must be lowercase), but places no such constraint on the
+    predicate. Lowercasing the whole string would still satisfy the
+    constant check but would break matching against Datalog rules written
+    against the graph's own label spelling, e.g. "Human(X) :- Person(X)."
+    expects a "Person(...)" fact, not "person(...)".
+    """
+    match = re.match(r'^([a-zA-Z0-9_]+)\((.*)\)$', fact_str.strip())
+    if not match:
+        return fact_str
+    predicate, args_str = match.groups()
+    args = [arg.strip().lower() for arg in args_str.split(',')]
+    return f"{predicate}({', '.join(args)})"
+
+
+def _run_reasoning_with_status(
+    cli_ctx: CLIContext, engine: str, fn: Callable[[], Dict[str, Any]]
+) -> Dict[str, Any]:
     """Run a reasoning computation, showing a spinner unless output is quiet/JSON."""
     if cli_ctx.quiet or cli_ctx.json_output:
         return fn()
@@ -2392,11 +2422,15 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
                 dr = DatalogReasoner(config=cli_ctx.config.to_dict())
                 for rule_def in (_load_rule_definitions(rules) if rules else []):
                     dr.add_rule(rule_def)
-                # Datalog reads a leading-uppercase argument as a variable, so
-                # graph-store facts like "Person(Alice)" must be lowercased
-                # to read as ground constants (see datalog_reasoner.py
-                # _is_variable()).
-                fact_strings = [f.lower() for f in _graph_store_facts(cli_ctx)]
+                # Datalog reads a leading-uppercase *argument* as a variable
+                # (see datalog_reasoner.py _is_variable(); predicate case is
+                # unconstrained), so graph-store facts like "Person(Alice)"
+                # need their arguments -- not the predicate -- lowercased to
+                # read as ground constants. Lowercasing the whole string
+                # would also break matching against rules written against
+                # the graph's own (typically title-case) label spelling,
+                # e.g. "Human(X) :- Person(X)."
+                fact_strings = [_lowercase_datalog_args(f) for f in _graph_store_facts(cli_ctx)]
                 for fact_str in fact_strings:
                     dr.add_fact(fact_str)
 
@@ -2426,6 +2460,15 @@ def reason_run(cli_ctx: CLIContext, engine: str, rules: Optional[str],
 
                 def _infer() -> Dict[str, Any]:
                     answer = gr.reason(graph, query_text)
+                    # GraphReasoner.reason() never raises on an LLM-side
+                    # failure (no provider configured, generation error) --
+                    # it returns a string starting with "Error" instead.
+                    # Surface that as a real command failure (non-zero exit)
+                    # rather than a successful result an automated caller
+                    # would read as a real answer.
+                    if answer.startswith("Error: LLM provider not initialized") or \
+                            answer.startswith("Error during reasoning:"):
+                        raise click.ClickException(answer)
                     return {
                         "engine": engine,
                         "query": query_text,
