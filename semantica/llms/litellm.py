@@ -5,6 +5,7 @@ Wrapper for LiteLLM library that provides unified access to 100+ LLM providers.
 Supports OpenAI, Anthropic, Groq, Azure, Bedrock, Vertex AI, and many more.
 """
 
+import time
 from typing import Any, Dict, List, Optional, Type, Union
 
 from pydantic import BaseModel
@@ -266,6 +267,8 @@ class LiteLLM:
                     f"{prompt}\n\nThe previous response did not match the required "
                     f"schema:\n{e}\n\nReturn valid JSON that matches the schema."
                 )
+                if _attempt < max_retries - 1:
+                    time.sleep(1)
 
         raise ProcessingError(
             f"LiteLLM typed generation failed after {max_retries} attempts: {last_error}"

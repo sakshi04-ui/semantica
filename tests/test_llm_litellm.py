@@ -62,6 +62,25 @@ def _with_instructor(monkeypatch, fake_client):
     return fake_instructor
 
 
+def _with_instructor_init_failure(monkeypatch, error=None):
+    """Point ``safe_import("instructor")`` at a module whose ``from_litellm()`` raises.
+
+    Simulates instructor being importable but unable to wrap this LiteLLM
+    ``completion`` (e.g. an incompatible instructor/litellm version pairing).
+    """
+    fake_instructor = MagicMock()
+    fake_instructor.from_litellm.side_effect = error or RuntimeError("incompatible client")
+    real = litellm_module.safe_import
+    monkeypatch.setattr(
+        litellm_module,
+        "safe_import",
+        lambda name, *a, **k: (fake_instructor, True)
+        if name == "instructor"
+        else real(name, *a, **k),
+    )
+    return fake_instructor
+
+
 def test_construction_raises_without_litellm_installed(monkeypatch):
     monkeypatch.setattr(litellm_module, "LITELLM_AVAILABLE", False)
     with pytest.raises(ProcessingError, match="LiteLLM library not installed"):
@@ -117,7 +136,24 @@ def test_generate_typed_surfaces_instructor_completion_error(litellm_available, 
     llm.generate_structured.assert_not_called()
 
 
-# --- fallback path: instructor is not available ----------------------------
+def test_generate_typed_falls_back_when_instructor_init_fails(litellm_available, monkeypatch):
+    """Regression test: instructor is installed but from_litellm() raises - this
+    must fall through to the manual loop and still succeed, not propagate the
+    init failure or skip generation."""
+    fake_instructor = _with_instructor_init_failure(monkeypatch)
+
+    llm = LiteLLM(model="openai/gpt-4o")
+    llm.generate_structured = MagicMock(return_value={"x": 5, "y": 6})
+
+    result = llm.generate_typed("give me a point", _Point)
+
+    assert isinstance(result, _Point)
+    assert (result.x, result.y) == (5, 6)
+    fake_instructor.from_litellm.assert_called_once()
+    llm.generate_structured.assert_called_once()
+
+
+# --- fallback path: instructor is not available -----------------------------
 
 
 def test_generate_typed_validates_structured_output(litellm_available, without_instructor):
@@ -131,7 +167,12 @@ def test_generate_typed_validates_structured_output(litellm_available, without_i
     llm.generate_structured.assert_called_once()
 
 
-def test_generate_typed_retries_then_raises_on_bad_output(litellm_available, without_instructor):
+def test_generate_typed_retries_then_raises_on_bad_output(
+    litellm_available, without_instructor, monkeypatch
+):
+    sleep_calls = []
+    monkeypatch.setattr(litellm_module.time, "sleep", sleep_calls.append)
+
     llm = LiteLLM(model="openai/gpt-4o")
     llm.generate_structured = MagicMock(return_value={"x": "not-an-int"})
 
@@ -144,3 +185,6 @@ def test_generate_typed_retries_then_raises_on_bad_output(litellm_available, wit
     retry_prompt = llm.generate_structured.call_args_list[1].args[0]
     assert first_prompt == "give me a point"
     assert "did not match the required" in retry_prompt
+    # Backs off between attempts (but not after the last one) - mirrors
+    # BaseProvider's fallback loop instead of hammering the API immediately.
+    assert sleep_calls == [1]

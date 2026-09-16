@@ -51,18 +51,20 @@ def test_generate_structured_forwards_to_the_real_provider():
     llm.provider.generate_structured.assert_called_once_with("hello")
 
 
-def test_generate_typed_forwards_schema_and_max_retries():
+def test_generate_typed_forwards_schema_max_retries_and_extra_kwargs():
+    """Also verifies the **kwargs contract: anything beyond schema/max_retries
+    (e.g. temperature) must reach the underlying provider unchanged."""
     llm = Groq(api_key="fake-key")
     llm.provider = MagicMock()
     llm.provider.is_available.return_value = True
     fake_schema = object()
     llm.provider.generate_typed.return_value = "typed result"
 
-    result = llm.generate_typed("hello", fake_schema, max_retries=5)
+    result = llm.generate_typed("hello", fake_schema, max_retries=5, temperature=0.5)
 
     assert result == "typed result"
     llm.provider.generate_typed.assert_called_once_with(
-        "hello", fake_schema, max_retries=5
+        "hello", fake_schema, max_retries=5, temperature=0.5
     )
 
 
