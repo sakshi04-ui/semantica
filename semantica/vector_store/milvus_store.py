@@ -13,6 +13,8 @@ Key Features:
     - Collection loading and release
     - Batch insert and search operations
     - Collection statistics and monitoring
+    - Connect via host/port (self-hosted server) or uri/token (Milvus Lite
+      file, remote server address, or Zilliz Cloud)
     - Optional dependency handling
 
 Main Classes:
@@ -30,6 +32,9 @@ Example Usage:
     >>> collection.load()
     >>> results = store.search_vectors(query_vector, limit=10, expr="category == 'science'")
     >>> stats = store.get_stats()
+
+    Or connect to Zilliz Cloud (or any uri-addressable Milvus) instead:
+    >>> store = MilvusStore(uri="https://<cluster>.zillizcloud.com", token="<api-key>")
 
 Author: Semantica Contributors
 License: MIT
@@ -122,21 +127,44 @@ class MilvusClient:
         port: int = 19530,
         user: Optional[str] = None,
         password: Optional[str] = None,
+        uri: Optional[str] = None,
+        token: Optional[str] = None,
         **options,
     ) -> bool:
-        """Connect to Milvus server."""
+        """Connect to Milvus.
+
+        If ``uri`` is given (a Milvus Lite file path, a server address like
+        ``http://localhost:19530``, or a Zilliz Cloud endpoint), connect via
+        uri and ignore host/port — pymilvus treats uri and host/port as
+        mutually exclusive addressing, so passing both raises. user/password
+        and token are both still forwarded alongside uri: a self-hosted
+        server reached by uri may use RBAC user/password rather than a
+        token, so dropping them would silently strip valid credentials.
+        Otherwise fall back to the existing host/port/user/password server
+        connection.
+        """
         if not MILVUS_AVAILABLE:
             raise ProcessingError("Milvus not available")
 
         try:
-            connections.connect(
-                alias=self.alias,
-                host=host,
-                port=port,
-                user=user,
-                password=password,
-                **options,
-            )
+            if uri:
+                connections.connect(
+                    alias=self.alias,
+                    uri=uri,
+                    user=user,
+                    password=password,
+                    token=token,
+                    **options,
+                )
+            else:
+                connections.connect(
+                    alias=self.alias,
+                    host=host,
+                    port=port,
+                    user=user,
+                    password=password,
+                    **options,
+                )
             return True
         except Exception as e:
             raise ProcessingError(f"Failed to connect to Milvus: {str(e)}")
@@ -303,9 +331,26 @@ class MilvusStore:
         port: int = 19530,
         user: Optional[str] = None,
         password: Optional[str] = None,
+        uri: Optional[str] = None,
+        token: Optional[str] = None,
         **config,
     ):
-        """Initialize Milvus store."""
+        """Initialize Milvus store.
+
+        Args:
+            host: Milvus server host. Ignored when ``uri`` is set.
+            port: Milvus server port. Ignored when ``uri`` is set.
+            user: Username for server auth (RBAC). Used with either host/port
+                or uri.
+            password: Password for server auth (RBAC). Used with either
+                host/port or uri.
+            uri: Connection URI — a Milvus Lite file path (e.g.
+                ``"./milvus.db"``), a server address (e.g.
+                ``"http://localhost:19530"``), or a Zilliz Cloud endpoint.
+                Takes precedence over host/port when set.
+            token: Auth token for ``uri`` (e.g. a Zilliz Cloud API key).
+            **config: Additional backend config.
+        """
         self.logger = get_logger("milvus_store")
         self.config = config
         self.progress_tracker = get_progress_tracker()
@@ -316,6 +361,8 @@ class MilvusStore:
         self.port = port or config.get("port", 19530)
         self.user = user or config.get("user")
         self.password = password or config.get("password")
+        self.uri = uri or config.get("uri")
+        self.token = token or config.get("token")
 
         self.client: Optional[MilvusClient] = None
         self.collection: Optional[MilvusCollection] = None
@@ -349,10 +396,15 @@ class MilvusStore:
                 port=self.port,
                 user=self.user,
                 password=self.password,
+                uri=self.uri,
+                token=self.token,
                 **options,
             )
 
-            self.logger.info(f"Connected to Milvus at {self.host}:{self.port}")
+            if self.uri:
+                self.logger.info(f"Connected to Milvus at {self.uri}")
+            else:
+                self.logger.info(f"Connected to Milvus at {self.host}:{self.port}")
             return True
         except Exception as e:
             raise ProcessingError(f"Failed to connect to Milvus: {str(e)}")
