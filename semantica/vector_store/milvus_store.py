@@ -43,12 +43,35 @@ License: MIT
 import math
 import re
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlsplit, urlunsplit
 
 import numpy as np
 
 from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
+
+
+def _redact_uri(uri: str) -> str:
+    """Return a connection uri safe to log.
+
+    A uri may carry credentials as userinfo (``scheme://user:pass@host``) or
+    in query parameters (e.g. an embedded token); both would otherwise reach
+    the logger verbatim on every successful connection. Strip both, keeping
+    only scheme/host/port/path. A uri with no scheme/netloc (a local Milvus
+    Lite file path like ``"./milvus.db"``) carries no such secrets and is
+    returned unchanged.
+    """
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return "<redacted>"
+    if not parts.scheme and not parts.netloc:
+        return uri
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _validate_milvus_key(key: str) -> str:
@@ -402,7 +425,7 @@ class MilvusStore:
             )
 
             if self.uri:
-                self.logger.info(f"Connected to Milvus at {self.uri}")
+                self.logger.info(f"Connected to Milvus at {_redact_uri(self.uri)}")
             else:
                 self.logger.info(f"Connected to Milvus at {self.host}:{self.port}")
             return True

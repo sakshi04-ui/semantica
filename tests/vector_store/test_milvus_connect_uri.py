@@ -9,7 +9,32 @@ test_milvus_store.py.
 
 from unittest.mock import patch
 
-from semantica.vector_store.milvus_store import MilvusStore
+from semantica.vector_store.milvus_store import MilvusStore, _redact_uri
+
+
+def test_redact_uri_strips_userinfo_credentials():
+    assert _redact_uri("https://user:pass@myhost:19530/db") == "https://myhost:19530/db"
+
+
+def test_redact_uri_strips_query_string_secrets():
+    assert _redact_uri("https://myhost:19530?token=secret") == "https://myhost:19530"
+
+
+def test_redact_uri_leaves_local_lite_path_unchanged():
+    # No scheme/netloc to redact -- a Milvus Lite file path carries no secrets.
+    assert _redact_uri("./milvus_demo.db") == "./milvus_demo.db"
+
+
+@patch("semantica.vector_store.milvus_store.connections")
+@patch("semantica.vector_store.milvus_store.MILVUS_AVAILABLE", True)
+def test_connect_logs_redacted_uri_not_raw_credentials(mock_connections):
+    store = MilvusStore(uri="https://user:s3cr3t@myhost:19530", token="tok")
+    with patch.object(store.logger, "info") as mock_info:
+        store.connect()
+
+    logged = " ".join(str(call) for call in mock_info.call_args_list)
+    assert "s3cr3t" not in logged
+    assert "myhost:19530" in logged
 
 
 @patch("semantica.vector_store.milvus_store.connections")
