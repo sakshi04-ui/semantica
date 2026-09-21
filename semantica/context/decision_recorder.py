@@ -168,13 +168,23 @@ class DecisionRecorder:
             # converted to CaseResult(status="error") inside evaluate();
             # reaching here means evaluate() itself failed outright.
             self.logger.warning(
-                f"Decision evaluation failed for {decision.decision_id}: {exc}"
+                f"Decision evaluation failed for {decision.decision_id}: {exc}",
+                exc_info=True,
             )
             return
 
         # Outside the try: a summary-shape change here is a bug in this hook,
         # not an evaluator failure, and must not be swallowed as one.
         case_result = summary.cases[0]
+        if case_result.status == "error":
+            # A named evaluator itself errored (unknown name, or it raised) --
+            # evaluate() already downgraded that to CaseResult(status="error")
+            # instead of propagating, so without this log the only trace is
+            # eval_details on the stored decision.
+            self.logger.warning(
+                f"Decision evaluator(s) errored for {decision.decision_id}: "
+                f"{case_result.details}"
+            )
         scores = [metric.score for metric in case_result.metrics.values()]
         decision.metadata["eval_score"] = sum(scores) / len(scores) if scores else 0.0
         decision.metadata["eval_passed"] = case_result.status == "pass"

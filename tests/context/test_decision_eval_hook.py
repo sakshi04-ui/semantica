@@ -5,6 +5,7 @@ This module tests the opt-in evaluators/eval_config wiring between
 semantica.evals and DecisionRecorder / AgentContext.
 """
 
+import logging
 from datetime import datetime
 from unittest.mock import Mock
 
@@ -13,6 +14,7 @@ import pytest
 from semantica.context.agent_context import AgentContext
 from semantica.context.decision_models import Decision
 from semantica.context.decision_recorder import DecisionRecorder
+from semantica.evals.types import CaseResult, EvalMetric, EvalSummary
 
 
 def _decision(**overrides):
@@ -141,12 +143,53 @@ class TestDecisionRecorderEvalHook:
         )
         decision = _decision()
 
-        decision_id = recorder.record_decision(decision, [], [])
+        with caplog.at_level(logging.WARNING):
+            decision_id = recorder.record_decision(decision, [], [])
 
         assert decision_id == decision.decision_id
         assert "eval_score" not in decision.metadata
         assert "eval_passed" not in decision.metadata
         assert mock_graph_store.execute_query.called
+        # The traceback must survive the log call, not just the message string.
+        record = next(r for r in caplog.records if "Decision evaluation failed" in r.message)
+        assert record.exc_info is not None
+
+    def test_evaluator_error_status_is_logged(
+        self, mock_graph_store, monkeypatch, caplog
+    ):
+        """A named evaluator erroring (unknown name, internal raise) -> logged,
+        not just buried in eval_details on the stored decision."""
+        error_summary = EvalSummary(
+            total=1,
+            passed=0,
+            failed=0,
+            errors=1,
+            pass_rate=0.0,
+            cases=[
+                CaseResult(
+                    case_id="eval-hook-d1",
+                    status="error",
+                    metrics={"decision_scores": EvalMetric(0.0, False, {"error": "boom"})},
+                    details={"decision_scores": {"error": "boom"}},
+                )
+            ],
+        )
+        monkeypatch.setattr(
+            "semantica.evals.evaluate", Mock(return_value=error_summary)
+        )
+        recorder = DecisionRecorder(
+            graph_store=mock_graph_store,
+            evaluators=["decision_scores"],
+        )
+        decision = _decision()
+
+        with caplog.at_level(logging.WARNING):
+            recorder.record_decision(decision, [], [])
+
+        assert decision.metadata["eval_passed"] is False
+        assert any(
+            "evaluator(s) errored" in r.message for r in caplog.records
+        )
 
 
 class TestAgentContextEvalHookWiring:
