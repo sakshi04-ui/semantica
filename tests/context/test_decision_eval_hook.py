@@ -195,6 +195,21 @@ class TestDecisionRecorderEvalHook:
 class TestAgentContextEvalHookWiring:
     """Test that AgentContext threads evaluators/eval_config into DecisionRecorder."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_node_embedder(self, monkeypatch):
+        """AgentContext(vector_store=..., knowledge_graph=...) constructs a real
+        ContextRetriever, which eagerly builds a DecisionEmbeddingPipeline and a
+        DecisionQuery, both of which construct NodeEmbedder(method="node2vec").
+        NodeEmbedder raises ImportError when the optional `gensim` dependency
+        (semantica[graph-embeddings]) isn't installed. These tests only check
+        that evaluators/eval_config land on the DecisionRecorder, so stub
+        NodeEmbedder out at both import sites rather than requiring gensim.
+        """
+        monkeypatch.setattr(
+            "semantica.vector_store.decision_embedding_pipeline.NodeEmbedder", Mock()
+        )
+        monkeypatch.setattr("semantica.context.decision_query.NodeEmbedder", Mock())
+
     @pytest.fixture
     def mock_vector_store(self):
         """Mock vector store for testing."""
