@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **dbt ingestor** (#TODO-issue-number) by @TODO-your-github-handle
+  - New `DbtConnector` / `DbtData` / `DbtNode` / `DbtIngestor` (`semantica.ingest`, lazy export), following the same Connector + Data + Ingestor pattern used for SAP/Snowflake/Salesforce
+  - Phase 1 parses local `manifest.json`/`catalog.json` artifacts (stdlib `json`, no network, no optional dependency) into models/sources/seeds/snapshots plus the `parent_map` lineage graph. `export_as_documents()` emits both entity documents and `source`/`target` relationship documents for dbt's lineage edges, so `GraphBuilder` consumes the lineage graph directly instead of re-deriving it via entity extraction
+  - Phase 2 (optional) queries the dbt Cloud Metadata API via GraphQL, SSRF-guarded through `request_with_ssrf_guard` since the API host is user-configurable
+  - New `pip install semantica[ingest-dbt]` extra (`requests>=2.28.0`; `requests` is already a core dependency, so this mirrors `ingest-sap`'s existing non-gating pattern rather than actually gating anything new)
+  - New `tests/test_dbt_ingestor.py` (25 tests, including a `GraphBuilder.build()` round-trip)
+  - Docs: `docs/integrations/dbt.md`
+
 - **`RelationalSchemaMapper`** (#1386, part 1) by @costajohnt
   - `semantica.kg.RelationalSchemaMapper` maps rows from a relational source (`DBIngestor`, `SnowflakeIngestor`, `DatabricksIngestor`, `PandasIngestor`, a DataFrame or plain row dicts) to the `{"entities", "relationships"}` shape `GraphBuilder` and `OntologyGenerator` consume: entity tables become entities keyed by primary key, foreign keys become typed relationships, junction tables become relationships only
   - Every entity and relationship is tagged with the `source` it came from so `ConflictDetector` can key credibility on it. New `tests/kg/test_schema_mapper.py`

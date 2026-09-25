@@ -245,6 +245,11 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "SAPIngestor": (".sap_ingestor", "SAPIngestor"),
     "SAPODataEntity": (".sap_ingestor", "SAPODataEntity"),
     "SAPODataConnector": (".sap_ingestor", "SAPODataConnector"),
+    # dbt ingestion
+    "DbtIngestor": (".dbt_ingestor", "DbtIngestor"),
+    "DbtData": (".dbt_ingestor", "DbtData"),
+    "DbtNode": (".dbt_ingestor", "DbtNode"),
+    "DbtConnector": (".dbt_ingestor", "DbtConnector"),
     # ServiceNow Table API ingestion
     "ServiceNowIngestor": (".servicenow_ingestor", "ServiceNowIngestor"),
     "ServiceNowData": (".servicenow_ingestor", "ServiceNowData"),
@@ -514,6 +519,11 @@ __all__ = [
     "SAPIngestor",
     "SAPODataEntity",
     "SAPODataConnector",
+    # dbt ingestion
+    "DbtIngestor",
+    "DbtData",
+    "DbtNode",
+    "DbtConnector",
     # ServiceNow Table API ingestion
     "ServiceNowIngestor",
     "ServiceNowData",
