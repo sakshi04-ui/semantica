@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 import uuid
 
-import networkx as nx
 import pytest
 
 from semantica.context.context_graph import ContextGraph
@@ -1051,11 +1050,11 @@ class TestGenericGraphFileLoading:
 # ---------------------------------------------------------------------------
 
 def _make_path_session() -> GraphSession:
-    """Return a GraphSession whose build_graph_dict yields an nx.DiGraph with A→B only.
+    """Return a GraphSession over a real ContextGraph with A→B only.
 
-    GraphSession wraps a ContextGraph (required by create_app), but we patch
-    build_graph_dict so PathFinder receives an actual NetworkX DiGraph — the
-    graph type the Explorer is designed to traverse for path queries.
+    Nothing is patched: the routes build their own traversable view via
+    ``GraphSession.build_nx_graph()``, so these tests exercise the production
+    graph shape (#1725).
     """
     cg = ContextGraph(advanced_analytics=False)
     cg.add_node("A", node_type="entity", content="Node A")
@@ -1065,17 +1064,7 @@ def _make_path_session() -> GraphSession:
     cg.add_edge("A", "B", edge_type="connects")
     cg.add_edge("gene/protein:6164", "disease/term:1", edge_type="connects")
 
-    session = GraphSession(cg)
-
-    # Patch build_graph_dict to return the directed NetworkX graph that
-    # PathFinder needs.  The ContextGraph dict format is not traversable by
-    # PathFinder; this mimics how a KG-backed session would expose the graph.
-    digraph = nx.DiGraph()
-    digraph.add_edge("A", "B")
-    digraph.add_edge("gene/protein:6164", "disease/term:1")
-    session.build_graph_dict = lambda node_ids=None: digraph  # type: ignore[method-assign]
-
-    return session
+    return GraphSession(cg)
 
 
 @pytest.fixture
@@ -1210,6 +1199,198 @@ class TestBidirectionalPathRoute:
 # ---------------------------------------------------------------------------
 
 from semantica.utils.helpers import classify_path_distance  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Path routes over the production ContextGraph shape (issue #1725)
+# ---------------------------------------------------------------------------
+
+def _make_chain_session() -> GraphSession:
+    """GraphSession over a real ContextGraph holding a → b → c."""
+    graph = ContextGraph(advanced_analytics=False)
+    for node_id in ("a", "b", "c"):
+        graph.add_node(node_id, node_type="entity", content=f"Node {node_id}")
+    graph.add_edge("a", "b", edge_type="related_to")
+    graph.add_edge("b", "c", edge_type="related_to")
+    return GraphSession(graph)
+
+
+@pytest.fixture
+def chain_client():
+    app = create_app(session=_make_chain_session())
+    with TestClient(app) as c:
+        yield c
+
+
+class TestPathRoutesOnContextGraph:
+    """A ContextGraph-backed session must be traversable by the path routes.
+
+    Before #1725 every one of these returned 404 "Source node a not found",
+    because the routes handed PathFinder the {"entities", "relationships"}
+    dict from build_graph_dict, which it cannot traverse.
+    """
+
+    def test_query_route_finds_multi_hop_path(self, chain_client):
+        resp = chain_client.get(
+            "/api/graph/path", params={"source": "a", "target": "c"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["path"] == ["a", "b", "c"]
+
+    def test_node_route_finds_multi_hop_path(self, chain_client):
+        resp = chain_client.get("/api/graph/node/a/path", params={"target": "c"})
+        assert resp.status_code == 200
+        assert resp.json()["path"] == ["a", "b", "c"]
+
+    def test_dijkstra_finds_multi_hop_path(self, chain_client):
+        resp = chain_client.get(
+            "/api/graph/path",
+            params={"source": "a", "target": "c", "algorithm": "dijkstra"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["path"] == ["a", "b", "c"]
+
+    def test_directed_traversal_still_rejects_reverse(self, chain_client):
+        """The fix must not turn the graph undirected by accident."""
+        resp = chain_client.get(
+            "/api/graph/path", params={"source": "c", "target": "a"}
+        )
+        assert resp.status_code == 404
+
+    def test_undirected_traversal_walks_edges_backwards(self, chain_client):
+        resp = chain_client.get(
+            "/api/graph/path",
+            params={"source": "c", "target": "a", "directed": "false"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["path"] == ["c", "b", "a"]
+
+    def test_path_resolves_edge_ids_for_every_hop(self, chain_client):
+        resp = chain_client.get(
+            "/api/graph/path", params={"source": "a", "target": "c"}
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["edge_ids"]) == 2
+
+    def test_total_weight_sums_edge_weights(self):
+        """PathFinder returns a list, so total_weight has to be summed from the
+        graph; the dead isinstance(result, dict) branch left it at 0.0."""
+        graph = ContextGraph(advanced_analytics=False)
+        for node_id in ("a", "b", "c"):
+            graph.add_node(node_id, node_type="entity", content=node_id)
+        graph.add_edge("a", "b", edge_type="related_to", weight=2.0)
+        graph.add_edge("b", "c", edge_type="related_to", weight=3.0)
+
+        app = create_app(session=GraphSession(graph))
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/graph/path",
+                params={"source": "a", "target": "c", "algorithm": "dijkstra"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["total_weight"] == 5.0
+
+    def test_distance_matrix_weighted_metric_sums_weights(self):
+        """The weighted metric called result.get() on a list and silently
+        returned None for every pair."""
+        graph = ContextGraph(advanced_analytics=False)
+        for node_id in ("a", "b", "c"):
+            graph.add_node(node_id, node_type="entity", content=node_id)
+        graph.add_edge("a", "b", edge_type="related_to", weight=2.0)
+        graph.add_edge("b", "c", edge_type="related_to", weight=3.0)
+
+        app = create_app(session=GraphSession(graph))
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/graph/distance-matrix",
+                json={"node_ids": ["a", "b", "c"], "metric": "weighted"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["matrix"] == [
+            [0.0, 2.0, 5.0],
+            [2.0, 0.0, 3.0],
+            [5.0, 3.0, 0.0],
+        ]
+
+    def test_alternative_paths_are_counted(self):
+        """find_k_shortest_paths takes no `directed` kwarg; passing one made
+        the enrichment raise TypeError and report 0 alternatives."""
+        graph = ContextGraph(advanced_analytics=False)
+        for node_id in ("a", "b", "c", "d"):
+            graph.add_node(node_id, node_type="entity", content=node_id)
+        graph.add_edge("a", "b", edge_type="related_to")
+        graph.add_edge("b", "d", edge_type="related_to")
+        graph.add_edge("a", "c", edge_type="related_to")
+        graph.add_edge("c", "d", edge_type="related_to")
+
+        app = create_app(session=GraphSession(graph))
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/graph/path", params={"source": "a", "target": "d"}
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["alternative_path_count"] == 1
+
+    def test_parallel_edges_collapse_to_lowest_weight(self):
+        """A DiGraph holds one edge per pair; the collapse must be deterministic."""
+        graph = ContextGraph(advanced_analytics=False)
+        graph.add_node("x", node_type="entity", content="X")
+        graph.add_node("y", node_type="entity", content="Y")
+        graph.add_edge("x", "y", edge_type="expensive", weight=9.0)
+        graph.add_edge("x", "y", edge_type="cheap", weight=1.0)
+
+        view = GraphSession(graph).build_nx_graph()
+
+        assert view.get_edge_data("x", "y")["weight"] == 1.0
+
+    def test_isolated_nodes_survive_the_graph_view(self):
+        """A node with no edges must still be findable as a path endpoint."""
+        graph = ContextGraph(advanced_analytics=False)
+        graph.add_node("lonely", node_type="entity", content="Lonely")
+
+        view = GraphSession(graph).build_nx_graph()
+
+        assert "lonely" in view
+
+    def test_distance_matrix_builds_the_graph_once(self, monkeypatch):
+        """The graph view must be hoisted out of the O(n^2) pair loop."""
+        session = _make_chain_session()
+        calls = {"count": 0}
+        real_build = session.build_nx_graph
+
+        def _counting_build():
+            calls["count"] += 1
+            return real_build()
+
+        monkeypatch.setattr(session, "build_nx_graph", _counting_build)
+
+        app = create_app(session=session)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/graph/distance-matrix",
+                json={"node_ids": ["a", "b", "c"], "metric": "hops"},
+            )
+
+        assert resp.status_code == 200
+        assert calls["count"] == 1
+
+    def test_distance_matrix_reports_hop_counts(self, chain_client):
+        """distance-matrix shared the defect: every pair landed in unreachable."""
+        resp = chain_client.post(
+            "/api/graph/distance-matrix",
+            json={"node_ids": ["a", "b", "c"], "metric": "hops"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["matrix"] == [
+            [0.0, 1.0, 2.0],
+            [1.0, 0.0, 1.0],
+            [2.0, 1.0, 0.0],
+        ]
+        assert not body.get("unreachable")
 
 
 class _FakeSimilarity:
