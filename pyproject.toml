@@ -159,6 +159,11 @@ embeddings-local = [
 nlp-spacy = [
   "spacy>=3.4.0"
 ]
+# LanguageDetector (semantica.normalize); without it every text is reported
+# as the default language.
+nlp-langdetect = [
+  "langdetect>=1.0.9"
+]
 
 # ---- Graph Backends ----
 graph-neo4j = ["neo4j>=5.0.0"]
@@ -290,7 +295,7 @@ explorer-lite = [
 # NOTE: there is no ``crewai`` extra to include here — see the comment above
 # the (removed) crewai entry under "Agentic Framework Integrations".
 all = [
-  "semantica[viz,media,infra,cloud,monitoring,watch,llm-all,models-huggingface,embeddings-local,nlp-spacy,documents,ingest-git,graph-embeddings,split-all,graph-all,tripletstore-oxigraph,vectorstore-all,parse-docling,parse-pdf,ingest-parquet,ingest-arrow,shacl,explorer,agno,langchain,google-adk]"
+  "semantica[viz,media,infra,cloud,monitoring,watch,llm-all,models-huggingface,embeddings-local,nlp-spacy,nlp-langdetect,documents,ingest-git,graph-embeddings,split-all,graph-all,tripletstore-oxigraph,vectorstore-all,parse-docling,parse-pdf,ingest-parquet,ingest-arrow,shacl,explorer,agno,langchain,google-adk]"
 ]
 
 # ---------------- DEVELOPMENT DEPENDENCIES (PEP 735) ----------------

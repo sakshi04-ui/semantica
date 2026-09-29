@@ -3860,6 +3860,15 @@ wheels = [
 ]
 
 [[package]]
+name = "langdetect"
+version = "1.0.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz", hash = "sha256:cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0", size = 981474, upload-time = "2021-05-07T07:54:13.562Z" }
+
+[[package]]
 name = "langsmith"
 version = "0.13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -8270,6 +8279,7 @@ all = [
     { name = "ipywidgets" },
     { name = "kafka-python" },
     { name = "langchain-core" },
+    { name = "langdetect" },
     { name = "librosa", version = "0.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "librosa", version = "1.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "litellm" },
@@ -8505,6 +8515,9 @@ monitoring = [
     { name = "opentelemetry-semantic-conventions" },
     { name = "prometheus-client" },
 ]
+nlp-langdetect = [
+    { name = "langdetect" },
+]
 nlp-spacy = [
     { name = "spacy" },
 ]
@@ -8640,6 +8653,7 @@ requires-dist = [
     { name = "ipywidgets", marker = "extra == 'viz'", specifier = ">=8.0.0" },
     { name = "kafka-python", marker = "extra == 'infra'", specifier = ">=3.0.2" },
     { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.3.0" },
+    { name = "langdetect", marker = "extra == 'nlp-langdetect'", specifier = ">=1.0.9" },
     { name = "librosa", marker = "extra == 'media'", specifier = ">=0.9.0" },
     { name = "litellm", marker = "extra == 'llm-litellm'", specifier = ">=1.83.9" },
     { name = "loguru", specifier = ">=0.7.3" },
@@ -8706,7 +8720,7 @@ requires-dist = [
     { name = "semantica", extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-typesafe"], marker = "extra == 'llm-all'" },
     { name = "semantica", extras = ["split-tiktoken", "split-community", "split-topic"], marker = "extra == 'split-all'" },
     { name = "semantica", extras = ["vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-faiss"], marker = "extra == 'vectorstore-all'" },
-    { name = "semantica", extras = ["viz", "media", "infra", "cloud", "monitoring", "watch", "llm-all", "models-huggingface", "embeddings-local", "nlp-spacy", "documents", "ingest-git", "graph-embeddings", "split-all", "graph-all", "tripletstore-oxigraph", "vectorstore-all", "parse-docling", "parse-pdf", "ingest-parquet", "ingest-arrow", "shacl", "explorer", "agno", "langchain", "google-adk"], marker = "extra == 'all'" },
+    { name = "semantica", extras = ["viz", "media", "infra", "cloud", "monitoring", "watch", "llm-all", "models-huggingface", "embeddings-local", "nlp-spacy", "nlp-langdetect", "documents", "ingest-git", "graph-embeddings", "split-all", "graph-all", "tripletstore-oxigraph", "vectorstore-all", "parse-docling", "parse-pdf", "ingest-parquet", "ingest-arrow", "shacl", "explorer", "agno", "langchain", "google-adk"], marker = "extra == 'all'" },
     { name = "sentence-transformers", marker = "extra == 'embeddings-local'", specifier = ">=2.2.0" },
     { name = "simple-salesforce", marker = "extra == 'db-salesforce'", specifier = ">=1.12.0" },
     { name = "snowflake-connector-python", marker = "extra == 'db-snowflake'", specifier = ">=4.6.0" },
@@ -8729,7 +8743,7 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'vectorstore-weaviate'", specifier = ">=4.0.0" },
     { name = "websockets", marker = "extra == 'explorer'", specifier = ">=15.0.1" },
 ]
-provides-extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-typesafe", "llm-all", "documents", "parse-docling", "parse-pdf", "shacl", "db-snowflake", "db-databricks", "db-arrow", "db-salesforce", "db-redshift", "db-cassandra", "db-bigquery", "ingest-looker", "ingest-parquet", "ingest-arrow", "ingest-sap", "ingest-servicenow", "ingest-airflow", "ingest-git", "db-all", "models-huggingface", "embeddings-local", "nlp-spacy", "graph-neo4j", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings", "graph-all", "tripletstore-oxigraph", "vectorstore-faiss", "vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-all", "infra", "cloud", "monitoring", "viz", "media", "gpu", "agno", "langchain", "google-adk", "open-ontologies", "watch", "split-tiktoken", "split-community", "split-topic", "split-all", "explorer", "explorer-lite", "all"]
+provides-extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-typesafe", "llm-all", "documents", "parse-docling", "parse-pdf", "shacl", "db-snowflake", "db-databricks", "db-arrow", "db-salesforce", "db-redshift", "db-cassandra", "db-bigquery", "ingest-looker", "ingest-parquet", "ingest-arrow", "ingest-sap", "ingest-servicenow", "ingest-airflow", "ingest-git", "db-all", "models-huggingface", "embeddings-local", "nlp-spacy", "nlp-langdetect", "graph-neo4j", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings", "graph-all", "tripletstore-oxigraph", "vectorstore-faiss", "vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-all", "infra", "cloud", "monitoring", "viz", "media", "gpu", "agno", "langchain", "google-adk", "open-ontologies", "watch", "split-tiktoken", "split-community", "split-topic", "split-all", "explorer", "explorer-lite", "all"]
 
 [package.metadata.requires-dev]
 dev = [
