@@ -241,10 +241,15 @@ async def _find_path_impl(
     if not path_nodes:
         raise HTTPException(status_code=404, detail=f"No path found from '{source}' to '{target}'")
 
+    # PathFinder traverses an undirected view when directed=False, so hops may
+    # run against a stored edge's direction. Cost and enrich the path on that
+    # same view or reverse hops miss and silently fall back to weight 1.0.
+    traversal_graph = path_graph if directed else path_graph.to_undirected()
+
     total_weight = (
         result.get("total_weight", 0.0)
         if isinstance(result, dict)
-        else _path_weight(path_graph, path_nodes)
+        else _path_weight(traversal_graph, path_nodes)
     )
     edge_ids = await asyncio.to_thread(session.resolve_path_edge_ids, path_nodes)
 
@@ -292,15 +297,15 @@ async def _find_path_impl(
                     default=None,
                 )
 
-        # Alternative paths — count simple paths within hop_count + 2
+        # Alternative paths — fetch up to hop_count + 2 shortest paths (Yen's
+        # k, a path count, not a hop-length bound) and discount the primary.
         if path_finder is not None and hop_count > 0:
             try:
-                # find_k_shortest_paths takes no `directed` argument, so the
-                # undirected case is expressed by handing it an undirected view.
-                k_graph = path_graph if directed else path_graph.to_undirected()
+                # find_k_shortest_paths takes no `directed` argument; the
+                # undirected case is expressed by the view itself.
                 k_paths = await asyncio.to_thread(
                     path_finder.find_k_shortest_paths,
-                    k_graph, source, target, hop_count + 2
+                    traversal_graph, source, target, hop_count + 2
                 )
                 alternative_path_count = max(0, len(k_paths) - 1)
             except Exception as exc:
@@ -497,22 +502,28 @@ async def distance_matrix(
                     )
                     if matrix_graph is None:
                         matrix_graph = await asyncio.to_thread(session.build_nx_graph)
-                    result = await asyncio.to_thread(path_fn, matrix_graph, src, tgt)
-                    path_nodes = result.get("path", []) if isinstance(result, dict) else (result or [])
-                    if path_nodes:
+
+                    # The graph is directed, so src->tgt says nothing about
+                    # tgt->src; search each direction instead of mirroring one
+                    # result into both cells (#1725).
+                    for row, col, a, b in ((i, j, src, tgt), (j, i, tgt, src)):
+                        result = await asyncio.to_thread(path_fn, matrix_graph, a, b)
+                        path_nodes = (
+                            result.get("path", [])
+                            if isinstance(result, dict)
+                            else (result or [])
+                        )
+                        if not path_nodes:
+                            unreachable.append((a, b))
+                            continue
                         if body.metric == "weighted":
-                            val = (
+                            matrix[row][col] = (
                                 float(result.get("total_weight", len(path_nodes) - 1))
                                 if isinstance(result, dict)
                                 else _path_weight(matrix_graph, path_nodes)
                             )
                         else:
-                            val = float(len(path_nodes) - 1)
-                        matrix[i][j] = val
-                        matrix[j][i] = val
-                    else:
-                        unreachable.append((src, tgt))
-                        unreachable.append((tgt, src))
+                            matrix[row][col] = float(len(path_nodes) - 1)
             except Exception as exc:
                 logger.debug("distance_matrix pair (%s, %s) failed: %s", src, tgt, exc)
                 unreachable.append((src, tgt))

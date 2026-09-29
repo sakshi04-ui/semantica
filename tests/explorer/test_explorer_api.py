@@ -1310,8 +1310,8 @@ class TestPathRoutesOnContextGraph:
         assert resp.status_code == 200
         assert resp.json()["matrix"] == [
             [0.0, 2.0, 5.0],
-            [2.0, 0.0, 3.0],
-            [5.0, 3.0, 0.0],
+            [None, 0.0, 3.0],
+            [None, None, 0.0],
         ]
 
     def test_alternative_paths_are_counted(self):
@@ -1333,6 +1333,82 @@ class TestPathRoutesOnContextGraph:
 
         assert resp.status_code == 200
         assert resp.json()["alternative_path_count"] == 1
+
+    def _reverse_edge_session(self) -> GraphSession:
+        """A single stored A -> B edge of weight 7.0."""
+        graph = ContextGraph(advanced_analytics=False)
+        graph.add_node("A", node_type="entity", content="A")
+        graph.add_node("B", node_type="entity", content="B")
+        graph.add_edge("A", "B", edge_type="related_to", weight=7.0)
+        return GraphSession(graph)
+
+    def test_undirected_reverse_hop_reports_the_stored_weight(self):
+        """Costing a reverse hop on the directed view missed the edge and
+        silently fell back to the 1.0 default."""
+        app = create_app(session=self._reverse_edge_session())
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/graph/path",
+                params={"source": "B", "target": "A", "directed": "false"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["total_weight"] == 7.0
+
+    def test_undirected_reverse_hop_reports_its_edge_id(self):
+        """resolve_path_edge_ids only scanned outgoing adjacency, so a
+        backwards-traversed hop contributed no id."""
+        app = create_app(session=self._reverse_edge_session())
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/graph/path",
+                params={"source": "B", "target": "A", "directed": "false"},
+            )
+
+        assert resp.status_code == 200
+        assert len(resp.json()["edge_ids"]) == 1
+
+    def test_distance_matrix_does_not_mirror_directed_results(self):
+        """Only A -> B exists, so B -> A must not be reported as reachable."""
+        app = create_app(session=self._reverse_edge_session())
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/graph/distance-matrix",
+                json={"node_ids": ["A", "B"], "metric": "hops"},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["matrix"] == [[0.0, 1.0], [None, 0.0]]
+        assert body["unreachable_pairs"] == [["B", "A"]]
+
+    def test_reported_edge_id_matches_the_traversed_parallel_edge(self):
+        """build_nx_graph keeps the lowest-weight parallel edge, so the
+        reported id must be that edge, not the highest-weight one."""
+        graph = ContextGraph(advanced_analytics=False)
+        graph.add_node("x", node_type="entity", content="X")
+        graph.add_node("y", node_type="entity", content="Y")
+        graph.add_edge("x", "y", edge_type="expensive", weight=9.0)
+        graph.add_edge("x", "y", edge_type="cheap", weight=1.0)
+        session = GraphSession(graph)
+
+        cheap_id = next(
+            str(edge.edge_id)
+            for edge in session.graph._adjacency["x"]
+            if float(edge.weight) == 1.0
+        )
+
+        app = create_app(session=session)
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/graph/path",
+                params={"source": "x", "target": "y", "algorithm": "dijkstra"},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total_weight"] == 1.0
+        assert body["edge_ids"] == [cheap_id]
 
     def test_parallel_edges_collapse_to_lowest_weight(self):
         """A DiGraph holds one edge per pair; the collapse must be deterministic."""
@@ -1385,12 +1461,15 @@ class TestPathRoutesOnContextGraph:
         )
         assert resp.status_code == 200
         body = resp.json()
+        # The graph is directed: a reaches b and c, but nothing reaches a.
         assert body["matrix"] == [
             [0.0, 1.0, 2.0],
-            [1.0, 0.0, 1.0],
-            [2.0, 1.0, 0.0],
+            [None, 0.0, 1.0],
+            [None, None, 0.0],
         ]
-        assert not body.get("unreachable")
+        assert sorted(body["unreachable_pairs"]) == [
+            ["b", "a"], ["c", "a"], ["c", "b"],
+        ]
 
 
 class _FakeSimilarity:

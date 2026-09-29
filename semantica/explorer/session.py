@@ -813,10 +813,20 @@ class GraphSession:
                     if edge.target_id == target_id
                 ]
                 if not candidates:
+                    # An undirected traversal can walk a stored edge backwards,
+                    # so a hop with no outgoing edge may still have an incoming
+                    # one to report (#1725).
+                    candidates = [
+                        edge for edge in self.graph._adjacency.get(target_id, [])
+                        if edge.target_id == source_id
+                    ]
+                if not candidates:
                     continue
+                # Lowest weight first, matching the edge build_nx_graph keeps
+                # and therefore the one the path was actually costed against.
                 candidates.sort(
                     key=lambda edge: (
-                        -float(edge.weight),
+                        float(edge.weight),
                         str(edge.edge_type),
                         str(edge.edge_id),
                     )
