@@ -74,6 +74,8 @@ jobs:
     #     must not silently skip the security scan).
     # For schedule/workflow_dispatch/push: changes is skipped; always() ensures
     # the scan still runs unconditionally for those triggers.
+    # TEST ONLY (#1952 fork test): force a timeout, install alone takes ~3 min
+    timeout-minutes: 2
     needs: [changes]
     if: >-
       always() && (
