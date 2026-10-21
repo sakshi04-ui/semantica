@@ -564,6 +564,20 @@ jobs:
                 .filter((issue) => !issue.pull_request)
                 .sort((a, b) => a.number - b.number);
 
+            // A re-run keeps the original event and commit, so re-running an
+            // older scheduled run must not close or open the tracking issue
+            // for a newer one. Only the latest scheduled run acts on it.
+            const { data: thisRun } = await github.rest.actions.getWorkflowRun({
+              owner, repo, run_id: context.runId,
+            });
+            const { data: { workflow_runs: [latest] } } = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id: thisRun.workflow_id, event: 'schedule', per_page: 1,
+            });
+            if (latest && latest.run_number > thisRun.run_number) {
+              console.log(`Newer scheduled run #${latest.run_number} (${latest.html_url}) supersedes this one (#${thisRun.run_number}); leaving the tracking issue unchanged.`);
+              return;
+            }
+
             // The scan recovered: close every open tracking issue.
             if (scanResult === 'success') {
               const open = await listOpen();
