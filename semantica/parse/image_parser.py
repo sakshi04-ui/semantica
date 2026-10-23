@@ -66,6 +66,10 @@ DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024  # bytes
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
+# Most chunks accepted between a PNG's IHDR and its image data. Real files
+# have a few dozen; libpng stops storing ancillary chunks after 1000.
+MAX_PNG_HEADER_CHUNKS = 1000
+
 # Image modes Pillow's PNG encoder can write.
 PNG_MODES = frozenset({"1", "L", "LA", "I", "I;16", "I;16B", "P", "RGB", "RGBA"})
 
@@ -125,8 +129,9 @@ def _png_canvas_size(data: bytes) -> Optional[tuple]:
         data: File contents
 
     Returns:
-        tuple: (width, height), or None if the header can't be read or
-            there is more than one IHDR chunk
+        tuple: (width, height), or None if the header can't be read, there
+            is more than one IHDR chunk, or there are more than
+            MAX_PNG_HEADER_CHUNKS chunks before the image data
     """
     # IHDR must be the first chunk: length, type, then big-endian width and
     # height.
@@ -135,15 +140,20 @@ def _png_canvas_size(data: bytes) -> Optional[tuple]:
 
     # Image.open reads chunks up to the image data and takes the size from
     # the last IHDR, so a second one could claim a bigger canvas than the
-    # first. The PNG spec allows only one.
+    # first. The PNG spec allows only one. The walk is bounded, so a file of
+    # millions of empty chunks can't stall it.
     pos = 20 + int.from_bytes(data[8:12], "big")
-    while pos + 8 <= len(data):
+    for _ in range(MAX_PNG_HEADER_CHUNKS + 1):
+        if pos + 8 > len(data):
+            break
         length, chunk = struct.unpack_from(">I4s", data, pos)
         if chunk == b"IHDR":
             return None
         if chunk in (b"IDAT", b"fdAT", b"IEND"):
             break
         pos += 12 + length
+    else:
+        return None
 
     return (
         int.from_bytes(data[16:20], "big"),

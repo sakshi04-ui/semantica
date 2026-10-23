@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 from PIL import Image
 
 from semantica.parse.image_parser import (
+    MAX_PNG_HEADER_CHUNKS,
     ImageParser,
     _png_canvas_size,
     _webp_canvas_size,
@@ -483,6 +484,23 @@ class TestImageParserLimits(unittest.TestCase):
         path = self._png_header(1, 1, animated=True)
         data = path.read_bytes()
         path.write_bytes(data[:33] + big_ihdr + data[33:])
+        with patch("semantica.parse.image_parser.Image.open") as image_open:
+            with self.assertRaises(ValidationError):
+                ImageParser().extract_metadata(path)
+            image_open.assert_not_called()
+
+    def test_png_header_chunk_walk_is_bounded(self):
+        # Up to MAX_PNG_HEADER_CHUNKS chunks before the image data are
+        # walked; one more is refused without walking the rest, so millions
+        # of empty chunks can't stall the check.
+        data = self._image("a.png", "PNG").read_bytes()
+        empty = struct.pack(">I", 0) + b"tEXt" + struct.pack(">I", zlib.crc32(b"tEXt"))
+        path = self.dir / "chunks.png"
+
+        path.write_bytes(data[:33] + empty * MAX_PNG_HEADER_CHUNKS + data[33:])
+        self.assertEqual(ImageParser().extract_metadata(path).width, 8)
+
+        path.write_bytes(data[:33] + empty * (MAX_PNG_HEADER_CHUNKS + 1) + data[33:])
         with patch("semantica.parse.image_parser.Image.open") as image_open:
             with self.assertRaises(ValidationError):
                 ImageParser().extract_metadata(path)
