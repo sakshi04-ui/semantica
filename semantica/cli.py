@@ -60,9 +60,11 @@ if TYPE_CHECKING:
 
 console = Console()
 
-# Supported interpreter range: ``requires-python = ">=3.10,<3.14"`` in
+# Supported interpreter range: ``requires-python = ">=3.11,<3.14"`` in
 # pyproject.toml. tests/test_python_support_policy.py fails if the two drift.
-MIN_PYTHON = (3, 10)
+# 3.10 was dropped in 0.8.0: it is past end of life and Pillow 13, which has
+# the security fixes 12.x lacks, needs 3.11 (#2067).
+MIN_PYTHON = (3, 11)
 MAX_PYTHON_EXCLUSIVE = (3, 14)
 
 

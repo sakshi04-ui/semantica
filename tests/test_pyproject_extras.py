@@ -2,9 +2,9 @@
 
 Review of #1508 caught ``parse-pdf`` missing from every ``all`` bundle:
 ``semantica[all]`` installed the package without pdfplumber, so the default
-PDFParser raised ProcessingError on first use. tomllib is stdlib only from
-Python 3.11, so the bundle block is parsed textually — the repo still
-supports 3.9/3.10.
+PDFParser raised ProcessingError on first use. The bundle block is parsed
+textually because the repo supported Python 3.9/3.10 when this was written,
+and tomllib is stdlib only from 3.11.
 """
 
 import re
