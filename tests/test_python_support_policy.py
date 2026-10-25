@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 import pytest
-import toml
+import tomllib
 import yaml
 
 from semantica import cli
@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.fixture(scope="module")
 def pyproject():
-    return toml.load(ROOT / "pyproject.toml")
+    with open(ROOT / "pyproject.toml", "rb") as f:
+        return tomllib.load(f)
 
 
 def _range(requires_python: str):

@@ -101,10 +101,9 @@ llm-deepseek = ["openai>=1.0.0"]
 llm-novita = ["openai>=1.0.0"]
 llm-litellm = ["litellm>=1.83.9"]
 llm-instructor = ["instructor>=1.15.3"]
-# TypeSafe SDK has no Python 3.9 release. Jev is also early-access, so keep the
-# integration on the reviewed 0.7 response contract until compatibility with a
-# newer minor line is verified.
-llm-typesafe = ["typesafe-sdk>=0.7.0,<0.8.0; python_version >= '3.10'"]
+# Jev is early-access, so keep the integration on the reviewed 0.7 response
+# contract until compatibility with a newer minor line is verified.
+llm-typesafe = ["typesafe-sdk>=0.7.0,<0.8.0"]
 
 llm-all = [
   "semantica[llm-openai,llm-groq,llm-gemini,llm-anthropic,llm-ollama,llm-deepseek,llm-novita,llm-litellm,llm-instructor,llm-typesafe]"

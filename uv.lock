@@ -7454,7 +7454,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'models-huggingface'", specifier = ">=1.13.1" },
     { name = "tqdm", specifier = ">=4.68.3" },
     { name = "transformers", marker = "extra == 'models-huggingface'", specifier = ">=4.20.0" },
-    { name = "typesafe-sdk", marker = "python_full_version >= '3.10' and extra == 'llm-typesafe'", specifier = ">=0.7.0,<0.8.0" },
+    { name = "typesafe-sdk", marker = "extra == 'llm-typesafe'", specifier = ">=0.7.0,<0.8.0" },
     { name = "umap-learn", marker = "extra == 'viz'", specifier = ">=0.5.12" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'explorer'", specifier = ">=0.22.0" },
     { name = "watchdog", marker = "extra == 'watch'", specifier = ">=6.0.0" },
